@@ -1,8 +1,19 @@
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
 app = FastAPI()
+
+# CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Pydantic model
 class Item(BaseModel):
@@ -46,5 +57,8 @@ def delete_item(item_id: int):
         raise HTTPException(status_code=404, detail="Item not found")
     del items_db[item_id]
     return {"message": "Item deleted"}
+
+# Mount static files after API routes
+app.mount("/", StaticFiles(directory="static", html=True), name="static")
 
 # Run with: uvicorn main:app --reload
