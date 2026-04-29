@@ -1,10 +1,40 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 
+# used the intele sense for the SQLAlchemy imports and ussages
+from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session
+
 app = FastAPI()
+
+# Database setup
+DATABASE_URL = "sqlite:///./items.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+# Database model
+class ItemModel(Base):
+    __tablename__ = "items"
+    
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, index=True)
+    description = Column(Text, nullable=True)
+
+# Create tables
+Base.metadata.create_all(bind=engine)
+
+# Dependency to get DB session
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 # CORS middleware
 app.add_middleware(
@@ -20,42 +50,45 @@ class Item(BaseModel):
     name: str
     description: Optional[str] = None
 
-# In-memory storage
-items_db: dict[int, dict] = {}
-next_id: int = 1
-
 # Endpoints
 @app.get("/items")
-def get_items():
-    return list(items_db.values())
+def get_items(db: Session = Depends(get_db)):
+    items = db.query(ItemModel).all()
+    return [{"id": item.id, "name": item.name, "description": item.description} for item in items]
 
 @app.get("/items/{item_id}")
-def get_item(item_id: int):
-    if item_id not in items_db:
+def get_item(item_id: int, db: Session = Depends(get_db)):
+    item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not item:
         raise HTTPException(status_code=404, detail="Item not found")
-    return items_db[item_id]
+    return {"id": item.id, "name": item.name, "description": item.description}
 
 @app.post("/items", status_code=201)
-def create_item(item: Item):
-    global next_id
-    new_item = {"id": next_id, "name": item.name, "description": item.description}
-    items_db[next_id] = new_item
-    next_id += 1
-    return new_item
+def create_item(item: Item, db: Session = Depends(get_db)):
+    db_item = ItemModel(name=item.name, description=item.description)
+    db.add(db_item)
+    db.commit()
+    db.refresh(db_item)
+    return {"id": db_item.id, "name": db_item.name, "description": db_item.description}
 
 @app.put("/items/{item_id}")
-def update_item(item_id: int, item: Item):
-    if item_id not in items_db:
+def update_item(item_id: int, item: Item, db: Session = Depends(get_db)):
+    db_item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not db_item:
         raise HTTPException(status_code=404, detail="Item not found")
-    updated_item = {"id": item_id, "name": item.name, "description": item.description}
-    items_db[item_id] = updated_item
-    return updated_item
+    db_item.name = item.name
+    db_item.description = item.description
+    db.commit()
+    db.refresh(db_item)
+    return {"id": db_item.id, "name": db_item.name, "description": db_item.description}
 
 @app.delete("/items/{item_id}")
-def delete_item(item_id: int):
-    if item_id not in items_db:
+def delete_item(item_id: int, db: Session = Depends(get_db)):
+    db_item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+    if not db_item:
         raise HTTPException(status_code=404, detail="Item not found")
-    del items_db[item_id]
+    db.delete(db_item)
+    db.commit()
     return {"message": "Item deleted"}
 
 # Mount static files after API routes

@@ -1,3 +1,4 @@
+# READ ME created completely by intelesense
 # Items Management App
 
 A full-stack web application for managing items with a FastAPI backend and vanilla JavaScript frontend, containerized with Docker.
