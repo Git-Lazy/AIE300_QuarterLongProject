@@ -18,6 +18,16 @@
 <body>
     <h1>Items Manager</h1>
 
+    <h2>Iris Classifier</h2>
+    <form id="predict-form">
+        <input type="number" step="any" id="f1" placeholder="Sepal length (e.g. 5.1)" required>
+        <input type="number" step="any" id="f2" placeholder="Sepal width (e.g. 3.5)" required>
+        <input type="number" step="any" id="f3" placeholder="Petal length (e.g. 1.4)" required>
+        <input type="number" step="any" id="f4" placeholder="Petal width (e.g. 0.2)" required>
+        <button type="submit">Predict</button>
+    </form>
+    <div id="predict-result"></div>
+
     <h2>Create New Item</h2>
     <form id="create-form">
         <input type="text" id="name" placeholder="Name" required>
@@ -100,6 +110,25 @@
             });
             loadItems();
         }
+
+        document.getElementById('predict-form').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const resultDiv = document.getElementById('predict-result');
+            try {
+                const features = ['f1','f2','f3','f4'].map(id => parseFloat(document.getElementById(id).value));
+                const response = await fetch(`${API_BASE}/predict`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ features })
+                });
+                const result = await response.json();
+                const pct = (result.confidence * 100).toFixed(1);
+                resultDiv.innerHTML =
+                    `<strong>Prediction:</strong> ${result.prediction} &nbsp;|&nbsp; <strong>Confidence:</strong> ${pct}%`;
+            } catch (err) {
+                resultDiv.innerHTML = `<span style="color:red">Error: ${err.message} — is the server running at ${API_BASE}?</span>`;
+            }
+        });
 
         // Load items on page load
         loadItems();
