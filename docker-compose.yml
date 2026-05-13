@@ -1,14 +1,26 @@
-version: "3.8"
-
 services:
-  web:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "8080:80"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  api:
     build: .
     ports:
       - "8000:8000"
-    volumes:
-      - ./static:/app/static
     environment:
       - MODEL_SERVICE_URL=http://model-service:8001
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     depends_on:
       model-service:
         condition: service_healthy

@@ -1,7 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
 import requests
@@ -116,8 +115,9 @@ def delete_item(item_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": "Item deleted"}
 
-# Mount static files after API routes
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+@app.get("/health")
+def health():
+    return {"status": "healthy", "model_service": MODEL_SERVICE_URL}
 
 # Run with: .\venv\Scripts\Activate.ps1
 # python iris_classifier.py

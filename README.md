@@ -5,22 +5,42 @@ A full-stack web application for managing items with a FastAPI backend and vanil
 
 ## Architecture
 
+Three containers, orchestrated by docker-compose:
+
 ```
-┌─────────────────┐    ┌─────────────────┐
-│   Browser       │    │   Docker        │
-│                 │    │   Container     │
-│  Frontend       │◄──►│                 │
-│  (HTML/CSS/JS)  │    │  Backend        │
-│                 │    │  (FastAPI)      │
-└─────────────────┘    │                 │
-                       │  Static Files   │
-                       │  Served         │
-                       └─────────────────┘
+                                  ┌──────────────────────────┐
+                                  │  /health checks          │
+                                  │  (compose waits for      │
+                                  │   each service to pass)  │
+                                  └──────────────────────────┘
+                                              ▲
+                                              │
+┌──────────┐   HTTP   ┌──────────────┐   HTTP ┌────────────┐   HTTP   ┌──────────────────┐
+│  Client  │ ───────► │  frontend    │ ─────► │   api      │ ───────► │  model-service   │
+│ (browser │          │  (:8080)     │        │  (:8000)   │          │     (:8001)      │
+│  curl…)  │ ◄─────── │  nginx       │ ◄───── │  FastAPI   │ ◄─────── │  FastAPI + torch │
+└──────────┘          │  serves UI + │        │  /predict  │          │  loads model.pth │
+                      │  proxies API │        │  proxies → │          │  + scaler.pkl    │
+                      └──────────────┘        └────────────┘          └──────────────────┘
+
+Request flow for a prediction:
+  Browser  →  http://localhost:8080/predict           (frontend, nginx)
+           →  http://api:8000/predict                  (proxied to api service)
+           →  http://model-service:8001/predict       (forwarded by api)
+           →  inference, response trickles back up the same path
 ```
 
-- **Frontend**: Vanilla HTML, CSS, and JavaScript served as static files
-- **Backend**: FastAPI with CORS enabled for browser requests
-- **Containerization**: Docker with docker-compose for easy deployment
+The client never talks to `model-service` directly — only the `api` service can reach it (Docker compose network).
+
+### Services
+
+| Service         | Tech              | Host port | Purpose                                           |
+| --------------- | ----------------- | --------- | ------------------------------------------------- |
+| `frontend`      | nginx:alpine      | 8080      | Serves `static/index.html`; reverse-proxies API   |
+| `api`           | FastAPI + uvicorn | 8000      | Items CRUD + `/predict` (forwards to model)       |
+| `model-service` | FastAPI + PyTorch | 8001      | Loads the trained Iris model; exposes `/predict`  |
+
+Each service has a `/health` endpoint and a docker-compose `healthcheck` so startup order is `model-service → api → frontend`.
 
 ## Quick Start with Docker
 
