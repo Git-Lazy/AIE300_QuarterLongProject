@@ -1,46 +1,21 @@
-from contextlib import asynccontextmanager
-from pathlib import Path
+import os
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import Optional
-import torch
-import torch.nn as nn
-import joblib
+import requests
 
 # used the intele sense for the SQLAlchemy imports and ussages
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-BASE_DIR = Path(__file__).parent
-IRIS_LABELS = ["setosa", "versicolor", "virginica"]
+# When running under docker-compose this resolves to the model-service container.
+# When running locally with uvicorn, it falls back to localhost:8001.
+MODEL_SERVICE_URL = os.getenv("MODEL_SERVICE_URL", "http://localhost:8001")
 
-class SimpleClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, num_classes):
-        super().__init__()
-        self.layer1 = nn.Linear(input_size, hidden_size)
-        self.relu   = nn.ReLU()
-        self.layer2 = nn.Linear(hidden_size, num_classes)
-
-    def forward(self, x):
-        x = self.relu(self.layer1(x))
-        return self.layer2(x)
-
-ml = {}
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    model = SimpleClassifier(input_size=4, hidden_size=16, num_classes=3)
-    model.load_state_dict(torch.load(BASE_DIR / "model.pth", weights_only=True))
-    model.eval()
-    ml["model"]  = model
-    ml["scaler"] = joblib.load(BASE_DIR / "scaler.pkl")
-    yield
-    ml.clear()
-
-app = FastAPI(lifespan=lifespan)
+app = FastAPI()
 
 # Database setup
 DATABASE_URL = "sqlite:///./items.db"
@@ -89,13 +64,16 @@ class PredictionRequest(BaseModel):
 def predict(req: PredictionRequest):
     if len(req.features) != 4:
         raise HTTPException(status_code=422, detail="Expected exactly 4 features")
-    scaled = ml["scaler"].transform([req.features])
-    tensor = torch.tensor(scaled, dtype=torch.float32)
-    with torch.no_grad():
-        logits = ml["model"](tensor)
-        probs  = torch.softmax(logits, dim=1)[0]
-        idx    = probs.argmax().item()
-    return {"prediction": IRIS_LABELS[idx], "confidence": round(probs[idx].item(), 4)}
+    try:
+        response = requests.post(
+            f"{MODEL_SERVICE_URL}/predict",
+            json={"features": req.features},
+            timeout=10,
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"Model service unavailable: {exc}")
+    return response.json()
 
 # Endpoints
 @app.get("/items")
