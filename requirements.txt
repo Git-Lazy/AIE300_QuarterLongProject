@@ -4,3 +4,5 @@ sqlalchemy
 torch
 scikit-learn
 requests
+openai
+python-dotenv

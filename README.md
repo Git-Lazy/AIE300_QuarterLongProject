@@ -89,3 +89,28 @@ The API will be available at `http://127.0.0.1:8000` and the interactive docs at
 - Frontend files are in `static/`
 - Backend code is in `main.py`
 - Use `docker-compose up --build` for development with live reload
+
+## Prompt engineering and structured output (`/analyze`)
+
+**System message used**: "You are a data analysis assistant. Analyze the provided content and respond with ONLY valid JSON in this exact format: { "categories": ["category1","category2"], "tags": ["tag1","tag2","tag3"], "sentiment": "positive" | "negative" | "neutral", "summary": "one sentence summary" } Do not include any text outside the JSON object." 
+
+Why: This instructs the model to only emit a JSON object with the exact fields the server expects, reducing parsing failures and making downstream code simpler.
+
+**Few-shot example included**:
+- Input: "The new laptop is incredibly fast and the battery lasts all day. Best purchase this year."
+- Output: {"categories": ["technology","review"], "tags": ["laptop","performance","battery"], "sentiment": "positive", "summary": "Highly positive review praising laptop speed and battery life."}
+
+Why: A concrete example anchors the expected output shape and phrasing, improving reliability.
+
+**Structured format expected**:
+- `categories`: array of short category strings
+- `tags`: array of short tag strings
+- `sentiment`: one of `positive`, `negative`, `neutral`
+- `summary`: a one-sentence English summary
+
+**Failure handling**:
+- Responses are parsed by extracting the first JSON object found in the model output and running `json.loads()`.
+- If parsing fails, the backend retries once after appending a brief instruction asking the model to "Please respond with ONLY the JSON object and no surrounding text.".
+- If retries fail, the endpoint returns a `4xx` or `5xx` HTTP error with a descriptive message. If a real secret was ever committed, remove it from history (see below).
+
+This design balances prompt clarity (system + few-shot), deterministic decoding (low temperature), and pragmatic parsing/ retry logic to handle noisy model outputs.

@@ -13,6 +13,14 @@
         .edit-mode .edit-form { display: block; }
         form { margin: 20px 0; }
         input, button { margin: 5px; padding: 5px; }
+        /* Chat styles */
+        #chat-container { border: 1px solid #ddd; padding: 10px; margin-top: 20px; max-width: 700px; }
+        #chat-messages { height: 250px; overflow-y: auto; border: 1px solid #eee; padding: 10px; background:#fafafa }
+        .msg { padding: 8px; margin: 6px 0; border-radius: 6px; max-width: 80%; }
+        .msg.user { background: #d1e7ff; align-self: flex-end; margin-left: auto; }
+        .msg.assistant { background: #f1f1f1; }
+        #chat-form { display:flex; gap:8px; margin-top:8px }
+        #chat-input { flex:1 }
     </style>
 </head>
 <body>
@@ -37,6 +45,16 @@
 
     <h2>Items List</h2>
     <div id="items-list"></div>
+
+    <h2>Chat with Assistant</h2>
+    <div id="chat-container">
+        <div id="chat-messages" aria-live="polite"></div>
+        <form id="chat-form">
+            <input id="chat-input" type="text" placeholder="Ask about items or usage..." required />
+            <button id="chat-send" type="submit">Send</button>
+            <span id="chat-loading" style="display:none">⏳</span>
+        </form>
+    </div>
 
     <script>
         const API_BASE = window.location.origin;
@@ -132,6 +150,52 @@
 
         // Load items on page load
         loadItems();
+
+        // --- Chat logic ---
+        const chatMessages = document.getElementById('chat-messages');
+        const chatForm = document.getElementById('chat-form');
+        const chatInput = document.getElementById('chat-input');
+        const chatLoading = document.getElementById('chat-loading');
+        let conversation_history = [];
+
+        function appendChatMessage(role, text) {
+            const div = document.createElement('div');
+            div.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
+            div.textContent = text;
+            chatMessages.appendChild(div);
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+        }
+
+        chatForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const message = chatInput.value.trim();
+            if (!message) return;
+            appendChatMessage('user', message);
+            chatInput.value = '';
+            chatLoading.style.display = 'inline';
+
+            try {
+                const res = await fetch(`${API_BASE}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message, conversation_history })
+                });
+
+                if (!res.ok) {
+                    const err = await res.text();
+                    appendChatMessage('assistant', 'Error: ' + err);
+                } else {
+                    const data = await res.json();
+                    appendChatMessage('assistant', data.reply);
+                    conversation_history = data.conversation_history || conversation_history;
+                }
+
+            } catch (err) {
+                appendChatMessage('assistant', 'Network error: ' + err.message);
+            } finally {
+                chatLoading.style.display = 'none';
+            }
+        });
     </script>
 </body>
 </html>
