@@ -62,6 +62,14 @@ docker-compose up --build
 pip install -r requirements.txt
 ```
 
+### Set environment variables
+
+Make sure `OPENAI_API_KEY` is set before starting the app so the agent can call the OpenAI API.
+
+```bash
+set OPENAI_API_KEY=your_api_key_here
+```
+
 ### Run the Server
 
 ```bash
@@ -77,6 +85,22 @@ The API will be available at `http://127.0.0.1:8000` and the interactive docs at
 - `POST /items` — Create a new item from JSON body (`201` on success)
 - `PUT /items/{id}` — Update an existing item, or `404` if not found
 - `DELETE /items/{id}` — Delete an item by ID, or `404` if not found
+- `POST /agent` — Run the agent on a natural language task, using tools for search, creation, and RAG lookup
+- `POST /agent/confirm` — Confirm or deny a pending destructive tool action when the agent requests approval
+
+## Agent interface and safety guardrails
+
+The frontend now includes a dedicated agent panel for natural language tasks, with explicit guardrails to keep tool use safe and transparent.
+
+Guardrails:
+- `POST /agent` is used for reasoning and tool selection only. This keeps the agent workflow separate from normal CRUD operations.
+- `POST /agent/confirm` is required before executing destructive tools like `create_item` or `delete_item`. This prevents accidental or unexpected data changes.
+- The UI shows a reasoning trace of the agent's tool calls and outputs. That transparency helps users understand what the agent did and why.
+
+Why each one matters:
+- explicit confirmation for destructive actions ensures the user stays in control and avoids unintended database changes.
+- separating the agent flow from direct item endpoints reduces risk by limiting tool execution to a controlled path.
+- trace output makes the agent's decisions visible, which improves trust and helps diagnose incorrect behavior.
 
 ## Screenshot
 

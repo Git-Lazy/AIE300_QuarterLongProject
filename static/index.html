@@ -46,14 +46,23 @@
     <h2>Items List</h2>
     <div id="items-list"></div>
 
-    <h2>Chat with Assistant</h2>
-    <div id="chat-container">
-        <div id="chat-messages" aria-live="polite"></div>
-        <form id="chat-form">
-            <input id="chat-input" type="text" placeholder="Ask about items or usage..." required />
-            <button id="chat-send" type="submit">Send</button>
-            <span id="chat-loading" style="display:none">⏳</span>
+    <h2>Agent Workspace</h2>
+    <div id="agent-container" style="border: 1px solid #ddd; padding: 10px; max-width: 700px;">
+        <form id="agent-form" style="display:flex; gap:8px; margin-bottom: 10px;">
+            <input id="agent-input" type="text" placeholder="Enter a task for the agent..." style="flex:1" required />
+            <button id="agent-send" type="submit">Run Agent</button>
+            <span id="agent-loading" style="display:none; align-self:center">⏳ Working...</span>
         </form>
+        <div id="agent-result" style="border: 1px solid #cce5ff; background: #e9f7ff; padding: 10px; margin-bottom: 10px; display:none;"></div>
+        <div id="agent-approval" style="display:none; border: 1px solid #f5c2c7; background: #fff1f0; padding: 10px; margin-bottom: 10px;">
+            <div id="pending-tool-text"></div>
+            <button id="approve-tool">Approve</button>
+            <button id="cancel-tool" type="button">Cancel</button>
+        </div>
+        <div id="trace-container" style="display:none;">
+            <h3>Reasoning trace</h3>
+            <pre id="trace-output" style="white-space: pre-wrap; background: #f7f7f7; padding: 10px; border: 1px solid #ddd;"></pre>
+        </div>
     </div>
 
     <script>
@@ -151,49 +160,145 @@
         // Load items on page load
         loadItems();
 
-        // --- Chat logic ---
-        const chatMessages = document.getElementById('chat-messages');
-        const chatForm = document.getElementById('chat-form');
-        const chatInput = document.getElementById('chat-input');
-        const chatLoading = document.getElementById('chat-loading');
+        // --- Agent logic ---
+        const agentForm = document.getElementById('agent-form');
+        const agentInput = document.getElementById('agent-input');
+        const agentLoading = document.getElementById('agent-loading');
+        const agentResult = document.getElementById('agent-result');
+        const agentApproval = document.getElementById('agent-approval');
+        const pendingToolText = document.getElementById('pending-tool-text');
+        const approveTool = document.getElementById('approve-tool');
+        const cancelTool = document.getElementById('cancel-tool');
+        const traceContainer = document.getElementById('trace-container');
+        const traceOutput = document.getElementById('trace-output');
         let conversation_history = [];
+        let currentTask = null;
+        let currentSteps = [];
+        let currentPendingTool = null;
 
-        function appendChatMessage(role, text) {
-            const div = document.createElement('div');
-            div.className = 'msg ' + (role === 'user' ? 'user' : 'assistant');
-            div.textContent = text;
-            chatMessages.appendChild(div);
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+        function setAgentResult(text) {
+            if (!text) {
+                agentResult.style.display = 'none';
+                agentResult.textContent = '';
+                return;
+            }
+            agentResult.style.display = 'block';
+            agentResult.textContent = text;
         }
 
-        chatForm.addEventListener('submit', async (e) => {
+        function renderTrace(steps) {
+            if (steps && steps.length) {
+                traceContainer.style.display = 'block';
+                traceOutput.textContent = JSON.stringify(steps, null, 2);
+            } else {
+                traceContainer.style.display = 'none';
+                traceOutput.textContent = '';
+            }
+        }
+
+        function showApproval(pending) {
+            currentPendingTool = pending;
+            pendingToolText.textContent = `The agent requests ${pending.name} with arguments ${JSON.stringify(pending.args)}. ${pending.description}`;
+            agentApproval.style.display = 'block';
+        }
+
+        function hideApproval() {
+            currentPendingTool = null;
+            agentApproval.style.display = 'none';
+            pendingToolText.textContent = '';
+        }
+
+        async function callAgent(payload, endpoint = '/agent') {
+            const res = await fetch(`${API_BASE}${endpoint}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            if (!res.ok) {
+                const err = await res.text();
+                throw new Error(err || 'Agent call failed');
+            }
+            return await res.json();
+        }
+
+        async function handleAgentResponse(data) {
+            currentSteps = data.steps || currentSteps;
+            conversation_history = data.conversation_history || conversation_history;
+            renderTrace(currentSteps);
+
+            if (data.status === 'needs_confirmation') {
+                setAgentResult('Awaiting your approval for a destructive tool call.');
+                showApproval(data.pending_tool);
+                return;
+            }
+
+            hideApproval();
+            if (data.result) {
+                setAgentResult(data.result);
+            } else if (data.message) {
+                setAgentResult(data.message);
+            } else {
+                setAgentResult('Agent completed with no final result.');
+            }
+        }
+
+        agentForm.addEventListener('submit', async (e) => {
             e.preventDefault();
-            const message = chatInput.value.trim();
-            if (!message) return;
-            appendChatMessage('user', message);
-            chatInput.value = '';
-            chatLoading.style.display = 'inline';
+            const task = agentInput.value.trim();
+            if (!task) return;
+            currentTask = task;
+            currentSteps = [];
+            hideApproval();
+            setAgentResult('');
+            agentLoading.style.display = 'inline';
 
             try {
-                const res = await fetch(`${API_BASE}/chat`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ message, conversation_history })
-                });
-
-                if (!res.ok) {
-                    const err = await res.text();
-                    appendChatMessage('assistant', 'Error: ' + err);
-                } else {
-                    const data = await res.json();
-                    appendChatMessage('assistant', data.reply);
-                    conversation_history = data.conversation_history || conversation_history;
-                }
-
+                const data = await callAgent({ task, conversation_history });
+                await handleAgentResponse(data);
             } catch (err) {
-                appendChatMessage('assistant', 'Network error: ' + err.message);
+                setAgentResult('Error: ' + err.message);
             } finally {
-                chatLoading.style.display = 'none';
+                agentLoading.style.display = 'none';
+            }
+        });
+
+        approveTool.addEventListener('click', async () => {
+            if (!currentTask || !currentPendingTool) return;
+            agentLoading.style.display = 'inline';
+            agentApproval.style.display = 'none';
+            try {
+                const data = await callAgent({
+                    task: currentTask,
+                    conversation_history,
+                    pending_tool: currentPendingTool,
+                    steps: currentSteps,
+                    approved: true
+                }, '/agent/confirm');
+                await handleAgentResponse(data);
+            } catch (err) {
+                setAgentResult('Error: ' + err.message);
+            } finally {
+                agentLoading.style.display = 'none';
+            }
+        });
+
+        cancelTool.addEventListener('click', async () => {
+            if (!currentTask || !currentPendingTool) return;
+            agentLoading.style.display = 'inline';
+            agentApproval.style.display = 'none';
+            try {
+                const data = await callAgent({
+                    task: currentTask,
+                    conversation_history,
+                    pending_tool: currentPendingTool,
+                    steps: currentSteps,
+                    approved: false
+                }, '/agent/confirm');
+                await handleAgentResponse(data);
+            } catch (err) {
+                setAgentResult('Error: ' + err.message);
+            } finally {
+                agentLoading.style.display = 'none';
             }
         });
     </script>

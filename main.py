@@ -1,25 +1,33 @@
 import os
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import requests
 from dotenv import load_dotenv
 from openai import OpenAI
 import json
 import time
 import re
+import ast
 
 # used the intele sense for the SQLAlchemy imports and ussages
 from sqlalchemy import create_engine, Column, Integer, String, Text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, Session
 
-# When running under docker-compose this resolves to the model-service container.
-# When running locally with uvicorn, it falls back to localhost:8001.
 MODEL_SERVICE_URL = os.getenv("MODEL_SERVICE_URL", "http://localhost:8001")
 
 app = FastAPI()
+
+# Serve static files from /static and return index.html from /
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+def root():
+    return FileResponse("static/index.html")
 
 # Load environment variables from .env when present
 load_dotenv()
@@ -268,3 +276,361 @@ def chat_endpoint(request: ChatRequest):
 
     # Run with: .\venv\Scripts\Activate.ps1
     # python iris_classifier.py
+
+
+class AskRequest(BaseModel):
+    query: str
+
+
+class AskResponse(BaseModel):
+    answer: str
+
+
+class ToolApproval(BaseModel):
+    tool_name: str
+    tool_args: Dict[str, Any]
+    approved: bool
+
+
+class AgentRequest(BaseModel):
+    task: str
+    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
+
+
+class AgentConfirmRequest(BaseModel):
+    task: str
+    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
+    pending_tool: Dict[str, Any]
+    steps: List[Dict[str, Any]] = Field(default_factory=list)
+    approved: bool
+
+
+class AgentResponse(BaseModel):
+    result: Optional[str] = None
+    steps: List[Dict[str, Any]] = Field(default_factory=list)
+    conversation_history: List[Dict[str, str]] = Field(default_factory=list)
+    status: str = "complete"
+    pending_tool: Optional[Dict[str, Any]] = None
+    message: Optional[str] = None
+
+
+TOOL_SCHEMAS = [
+    {
+        "name": "search_items",
+        "description": "Search items in the database by keyword.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search keyword"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "name": "create_item",
+        "description": "Create a new item in the database.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Item name"},
+                "description": {"type": "string", "description": "Item description"}
+            },
+            "required": ["name", "description"]
+        }
+    },
+    {
+        "name": "delete_item",
+        "description": "Delete an item by ID from the database.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "integer", "description": "ID of the item to delete"}
+            },
+            "required": ["item_id"]
+        }
+    },
+    {
+        "name": "query_rag",
+        "description": "Query the RAG system for a content answer.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Question to ask the RAG system"}
+            },
+            "required": ["query"]
+        }
+    }
+]
+
+API_BASE = os.getenv("API_BASE", "http://127.0.0.1:8000")
+
+
+def get_items_from_db(query: str = "") -> List[Dict[str, Any]]:
+    db = SessionLocal()
+    try:
+        if query:
+            items = db.query(ItemModel).filter(
+                (ItemModel.name.ilike(f"%{query}%")) |
+                (ItemModel.description.ilike(f"%{query}%"))
+            ).all()
+        else:
+            items = db.query(ItemModel).all()
+        return [{"id": item.id, "name": item.name, "description": item.description} for item in items]
+    finally:
+        db.close()
+
+
+def create_item_in_db(name: str, description: str) -> Dict[str, Any]:
+    db = SessionLocal()
+    try:
+        db_item = ItemModel(name=name, description=description)
+        db.add(db_item)
+        db.commit()
+        db.refresh(db_item)
+        return {"id": db_item.id, "name": db_item.name, "description": db_item.description}
+    finally:
+        db.close()
+
+
+def delete_item_in_db(item_id: int) -> str:
+    db = SessionLocal()
+    try:
+        item = db.query(ItemModel).filter(ItemModel.id == item_id).first()
+        if not item:
+            return f"No item found with id {item_id}."
+        db.delete(item)
+        db.commit()
+        return f"Deleted item {item_id}: {item.name}."
+    finally:
+        db.close()
+
+
+@app.post("/ask", response_model=AskResponse)
+def ask_endpoint(request: AskRequest):
+    matches = get_items_from_db(request.query)
+    if not matches:
+        return AskResponse(answer=f"No relevant items found for '{request.query}'.")
+
+    answer_lines = [f"{item['name']}: {item['description']}" for item in matches[:5]]
+    answer = f"Found {len(matches)} matching items. " + " ".join(answer_lines)
+    return AskResponse(answer=answer)
+
+
+def search_items_tool(query: str) -> str:
+    matches = get_items_from_db(query)
+    if not matches:
+        return f"No items found for '{query}'."
+    return json.dumps(matches)
+
+
+def create_item_tool(name: str, description: str) -> str:
+    created = create_item_in_db(name, description)
+    return json.dumps(created)
+
+
+def delete_item_tool(item_id: int) -> str:
+    return delete_item_in_db(item_id)
+
+
+def query_rag_tool(query: str) -> str:
+    try:
+        response = requests.post(f"{API_BASE}/ask", json={"query": query}, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data.get("answer", str(data))
+    except requests.RequestException as exc:
+        return f"RAG request failed: {exc}"
+
+
+def execute_tool(tool_name: str, tool_args: Dict[str, Any]) -> str:
+    if tool_name == "search_items":
+        return search_items_tool(tool_args["query"])
+    if tool_name == "create_item":
+        return create_item_tool(tool_args["name"], tool_args["description"])
+    if tool_name == "delete_item":
+        return delete_item_tool(tool_args["item_id"])
+    if tool_name == "query_rag":
+        return query_rag_tool(tool_args["query"])
+    raise ValueError(f"Unknown tool: {tool_name}")
+
+
+def requires_confirmation(tool_name: str) -> bool:
+    return tool_name in {"create_item", "delete_item"}
+
+
+def parse_tool_call(message: Any) -> Tuple[str, Dict[str, Any]]:
+    if getattr(message, "tool_calls", None):
+        tool_call = message.tool_calls[0]
+        arguments = tool_call.function.arguments
+        name = tool_call.function.name
+    elif getattr(message, "function_call", None):
+        tool_call = message.function_call
+        arguments = tool_call.arguments
+        name = tool_call.name
+    else:
+        raise ValueError("No tool call found in the response message.")
+
+    try:
+        parsed_args = json.loads(arguments)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON arguments from model: {exc}\n{arguments}") from exc
+
+    return name, parsed_args
+
+
+def call_llm(messages: List[Dict[str, Any]]) -> Any:
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=messages,
+        tools=TOOL_SCHEMAS,
+        temperature=0,
+        max_tokens=512,
+    )
+    return response.choices[0].message
+
+
+def run_agent(task: str, conversation_history: List[Dict[str, str]] = None, max_steps: int = 10):
+    if conversation_history is None:
+        conversation_history = []
+
+    system_msg = {
+        "role": "system",
+        "content": (
+            "You are an agent that can use tools to search the item database, "
+            "create or delete items, and query the RAG system. "
+            "Only call a tool when it is needed, and return a final answer when done."
+        )
+    }
+
+    messages: List[Dict[str, Any]] = [system_msg] + conversation_history + [{"role": "user", "content": task}]
+    steps: List[Dict[str, Any]] = []
+
+    for iteration in range(max_steps):
+        model_message = call_llm(messages)
+        if not getattr(model_message, "tool_calls", None) and not getattr(model_message, "function_call", None):
+            result = model_message.content or ""
+            return {
+                "status": "complete",
+                "result": result,
+                "steps": steps,
+                "conversation_history": conversation_history + [
+                    {"role": "user", "content": task},
+                    {"role": "assistant", "content": result}
+                ]
+            }
+
+        tool_name, tool_args = parse_tool_call(model_message)
+        if requires_confirmation(tool_name):
+            return {
+                "status": "needs_confirmation",
+                "steps": steps,
+                "conversation_history": conversation_history,
+                "pending_tool": {
+                    "name": tool_name,
+                    "args": tool_args,
+                    "description": next(tool["description"] for tool in TOOL_SCHEMAS if tool["name"] == tool_name)
+                },
+                "message": f"The agent wants to call {tool_name} with {tool_args}. Please approve to continue."
+            }
+
+        try:
+            tool_output = execute_tool(tool_name, tool_args)
+        except Exception as exc:
+            tool_output = f"Tool failed: {exc}"
+
+        steps.append({"tool": tool_name, "input": tool_args, "output": tool_output})
+        messages.append({"role": "tool", "name": tool_name, "content": tool_output})
+
+    return {
+        "status": "complete",
+        "result": "Step limit reached.",
+        "steps": steps,
+        "conversation_history": conversation_history
+    }
+
+
+@app.post("/agent", response_model=AgentResponse)
+def agent_endpoint(request: AgentRequest):
+    if client is None:
+        raise HTTPException(status_code=500, detail="OpenAI client not configured. Set OPENAI_API_KEY in environment.")
+
+    response = run_agent(request.task, request.conversation_history)
+    return AgentResponse(**response)
+
+
+@app.post("/agent/confirm", response_model=AgentResponse)
+def agent_confirm(request: AgentConfirmRequest):
+    if client is None:
+        raise HTTPException(status_code=500, detail="OpenAI client not configured. Set OPENAI_API_KEY in environment.")
+
+    if not request.approved:
+        return AgentResponse(
+            result="Action cancelled by user.",
+            steps=request.steps,
+            conversation_history=request.conversation_history,
+            status="complete",
+            message="The destructive action was not approved."
+        )
+
+    pending_tool = request.pending_tool
+    tool_name = pending_tool["name"]
+    tool_args = pending_tool["args"]
+
+    try:
+        tool_output = execute_tool(tool_name, tool_args)
+    except Exception as exc:
+        tool_output = f"Tool failed: {exc}"
+
+    steps = request.steps + [{"tool": tool_name, "input": tool_args, "output": tool_output}]
+    updated_history = request.conversation_history + [
+        {"role": "user", "content": request.task},
+        {"role": "assistant", "content": f"Calling {tool_name} with {tool_args}."},
+        {"role": "tool", "name": tool_name, "content": tool_output}
+    ]
+    messages = [
+        {"role": "system", "content": (
+            "You are an agent that can use tools to search the item database, "
+            "create or delete items, and query the RAG system. "
+            "Only call a tool when it is needed, and return a final answer when done."
+        )}
+    ] + updated_history
+
+    for _ in range(5):
+        model_message = call_llm(messages)
+        if not getattr(model_message, "tool_calls", None) and not getattr(model_message, "function_call", None):
+            result = model_message.content or ""
+            return AgentResponse(
+                result=result,
+                steps=steps,
+                conversation_history=updated_history + [{"role": "assistant", "content": result}],
+                status="complete"
+            )
+
+        next_tool_name, next_tool_args = parse_tool_call(model_message)
+        if requires_confirmation(next_tool_name):
+            return AgentResponse(
+                steps=steps,
+                conversation_history=updated_history,
+                status="needs_confirmation",
+                pending_tool={
+                    "name": next_tool_name,
+                    "args": next_tool_args,
+                    "description": next(tool["description"] for tool in TOOL_SCHEMAS if tool["name"] == next_tool_name)
+                },
+                message=f"The agent wants to call {next_tool_name} with {next_tool_args}. Please approve to continue."
+            )
+
+        try:
+            next_tool_output = execute_tool(next_tool_name, next_tool_args)
+        except Exception as exc:
+            next_tool_output = f"Tool failed: {exc}"
+
+        steps.append({"tool": next_tool_name, "input": next_tool_args, "output": next_tool_output})
+        messages.append({"role": "tool", "name": next_tool_name, "content": next_tool_output})
+
+    return AgentResponse(
+        result="Step limit reached.",
+        steps=steps,
+        conversation_history=updated_history,
+        status="complete"
+    )
